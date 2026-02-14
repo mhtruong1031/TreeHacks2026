@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.signal import decimate, resample
+from scipy.signal import butter, filtfilt, decimate, resample
 
 
 class PreprocessingPipeline:
@@ -25,6 +25,80 @@ class PreprocessingPipeline:
         if dt <= 0:
             raise ValueError("Time values must be monotonically increasing.")
         return 1.0 / dt
+
+    def lowpass_blink_filter(
+        self,
+        signal: np.ndarray,
+        fs: float,
+        cutoff: float = 30.0,
+        order: int = 4,
+    ) -> np.ndarray:
+        """Low-pass Butterworth filter to attenuate sharp blink spike transients.
+
+        Eye blinks produce large, fast negative deflections whose sharp edges
+        contain high-frequency energy.  A low-pass filter smooths out those
+        transients while preserving the slower brain-relevant frequencies.
+
+        Args:
+            signal:  1-D voltage array (single channel).
+            fs:      Sampling frequency in Hz.
+            cutoff:  Low-pass cutoff frequency in Hz (default 30 Hz).
+                     Frequencies *above* this are attenuated.
+            order:   Butterworth filter order (default 4).
+
+        Returns:
+            Filtered 1-D voltage array (same length as input).
+        """
+        nyquist = fs / 2.0
+        if cutoff >= nyquist:
+            raise ValueError(
+                f"Cutoff ({cutoff} Hz) must be below the Nyquist frequency ({nyquist} Hz)."
+            )
+        b, a = butter(order, cutoff / nyquist, btype="low")
+        return filtfilt(b, a, signal)
+
+    def bandstop_sweat_filter(
+        self,
+        signal: np.ndarray,
+        fs: float,
+        center: float = 0.5,
+        width: float = 0.4,
+        order: int = 4,
+    ) -> np.ndarray:
+        """Band-stop (notch) filter to remove sweat-related artifacts around 0.5 Hz.
+
+        Sweat artifacts produce slow galvanic skin-potential drifts that
+        concentrate around ~0.5 Hz.  This filter removes a narrow band
+        centred on that frequency while preserving content above and below.
+
+        Args:
+            signal:  1-D voltage array (single channel).
+            fs:      Sampling frequency in Hz.
+            center:  Centre frequency of the stop band in Hz (default 0.5 Hz).
+            width:   Full width of the stop band in Hz (default 0.4 Hz),
+                     so the band spans [center - width/2, center + width/2],
+                     i.e. [0.3, 0.7] Hz by default.
+            order:   Butterworth filter order (default 4).
+
+        Returns:
+            Filtered 1-D voltage array (same length as input).
+        """
+        nyquist = fs / 2.0
+        low = (center - width / 2.0) / nyquist
+        high = (center + width / 2.0) / nyquist
+
+        if low <= 0:
+            raise ValueError(
+                f"Lower stop-band edge ({center - width / 2.0} Hz) must be > 0 Hz."
+            )
+        if high >= 1.0:
+            raise ValueError(
+                f"Upper stop-band edge ({center + width / 2.0} Hz) must be "
+                f"below the Nyquist frequency ({nyquist} Hz)."
+            )
+
+        b, a = butter(order, [low, high], btype="bandstop")
+        return filtfilt(b, a, signal)
 
     def _downsample_single_channel(
         self,
