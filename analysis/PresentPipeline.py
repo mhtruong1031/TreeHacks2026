@@ -5,16 +5,12 @@ class PresentPipeline:
         pass
 
     # data should be a given time window of movement data
-    def run(self, data):
+    def get_coordination_index(self, data):
         # Determine coordination
         SDV_energy, SVD_axes = self.run_SVD(data)
         bimodality_coefficient = self.run_clustering(data, SVD_axes)
 
         coordination_index = np.linalg.norm(np.array(1, 0) - np.array(SVD_energy, SVD_axes)) # (SVD, Modality)
-
-
-
-
     
     # SVD
     # for some given  rank n movement grab the sum energy given by the top n eigenvalues
