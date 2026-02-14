@@ -17,7 +17,6 @@ class MainPipeline:
         
         self.data                 = np.array([])
         self.processed_data       = np.array([])
-        self.coordination_indexes = np.array([0]) * (self.window_size_samples//2)
         self.max_n_coord_cache    = MaxNCoordCache(epsilon=0.1) # MaxHeap of each attempt ranked by Coordination Index
 
         # Initialize pipelines
@@ -27,23 +26,27 @@ class MainPipeline:
 
     # Current_sample is a packet (single time point)
     def run(self, packet):
+        # Add packet to data
         self.data = np.concatenate((self.data, packet))
         if len(self.data) < self.window_size_samples:
             return
 
-        if check_activation():
-
+        # Get current window
         current_window = self.data[len(self.data) - self.window_size_samples:]
 
+        # Preprocess window for downstream processing
         current_sample      = self.preprocessing_pipeline.run(current_window) # note: should be centered around 0
         self.processed_data = np.concatenate((self.processed_data, current_sample[-1])) # only add the newest time point
 
-        coordination_index = self.present_pipeline.get_coordination_index(current_sample)
-
-        self.max_n_coord_cache.add_node(coordination_index, (len(self.data) - self.window_size_samples, len(self.data)))
-            
+        # Check for activation
+        activation_window = self.check_activation():
+        if activation_window: # If activation window is found, get coordination index and add to cache
+            coordination_index = self.present_pipeline.get_coordination_index(self.processed_data[activation_window[0]:activation_window[1]])
+            self.max_n_coord_cache.add_node(coordination_index, activation_window)
+        
+        # If enough data has been collected for prediction, run prediction pipeline
         if len(self.activation_windows) >= self.prediction_data_threshold: #if enough data has been collected for prediction
-            self.prediction_pipeline.run(current_sample) # TODO
+            self.prediction_pipeline.run(current_sample) # TODO STUFF
     
     def check_activation(self):
         if np.math.abs(self.data[-1]) > self.activation_threshold:

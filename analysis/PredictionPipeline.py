@@ -38,7 +38,7 @@ class PredictionPipeline:
         training_loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
         self.model = self.model.to(self.device)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
 
         for epoch in range(self.epochs):
             self.model.train()
@@ -63,14 +63,28 @@ class PredictionPipeline:
         torch.save(self.model.state_dict(), "../cache/neural_prediction_model.pth")
         return self.model
 
-    # Train the model on a new data point
+    # Train the model on a new data point (updates weights using the latest datapoint)
     def add_to_model(self, data: np.ndarray):
+        if self.model is None:
+            raise RuntimeError("model not initialized; call train_initial_model first")
+        if self.optimizer is None:
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        self.model.train()
+        # Ensure batch dimension: (n_timesteps, n_features) -> (1, n_timesteps, n_features)
+        if data.ndim == 2:
+            data = data[np.newaxis, ...]
         inputs = torch.tensor(data, dtype=torch.float32).to(self.device)
+        targets = torch.tensor(data, dtype=torch.float32).to(self.device)
+        self.optimizer.zero_grad()
         outputs = self.model(inputs)
-        loss = self.loss_function(outputs, data)
+        if isinstance(outputs, tuple):
+            outputs = outputs[0]
+        # Align target shape with model output (e.g. model may output (batch, seq, 1))
+        if outputs.shape != targets.shape:
+            targets = targets[..., : outputs.shape[-1]]
+        loss = self.loss_function(outputs, targets)
         loss.backward()
-        optimizer.step()
-        return outputs
+        self.optimizer.step()
 
     # Predict the next data point
     def predict(self, data: np.ndarray):

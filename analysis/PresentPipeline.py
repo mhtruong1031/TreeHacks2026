@@ -57,3 +57,5 @@ class PresentPipeline:
         denom = kurtosis + (3 * (n - 1) ** 2) / ((n - 2) * (n - 3))
         bimodality_coefficient = ((skewness ** 2) + 1) / denom if denom > 0 else 0.0
         return bimodality_coefficient
+    
+    # similarity score
