@@ -9,9 +9,9 @@ class MainPipeline:
         self.activation_threshold      = activation_threshold      # neuron activation threshold
         self.prediction_data_threshold = prediction_data_threshold # prediction data threshold
         
-        self.data                 = []
-        self.coordination_indexes = [0] * (self.window_size_samples//2)
-        self.activation_windows   = [] # list of activation windows such that (start_index, end_index)
+        self.data                 = np.array([])
+        self.coordination_indexes = np.array([0] * (self.window_size_samples//2))
+        self.activation_windows   = np.array([]) # list of activation windows such that (start_index, end_index)
 
         # Initialize pipelines
         self.preprocessing_pipeline = PreprocessingPipeline() # Stage 1
@@ -20,10 +20,12 @@ class MainPipeline:
 
     def run(self, data):
         if len(self.data) < self.window_size_samples:
-            self.data.append(data)
+            self.data = np.concatenate((self.data, data))
             return
             
+        if len(self.activation_windows) > self.prediction_data_threshold:
+            self.prediction_pipeline.run(self.data)
         else:
-            if self
+            self.present_pipeline.run(self.data)
             
 
