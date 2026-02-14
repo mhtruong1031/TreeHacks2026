@@ -3,7 +3,7 @@ from scipy.signal import decimate, resample
 
 
 class PreprocessingPipeline:
-    """Preprocessing pipeline that downsamples windowed time/voltage data to 100 Hz."""
+    """Preprocessing pipeline that downsamples a multi-channel time x voltage matrix to 100 Hz."""
 
     def __init__(self, target_fs: float = 100.0):
         """
@@ -26,51 +26,81 @@ class PreprocessingPipeline:
             raise ValueError("Time values must be monotonically increasing.")
         return 1.0 / dt
 
-    def downsample_window(
+    def _downsample_single_channel(
         self,
-        times: np.ndarray,
-        voltages: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Downsample a single window of time/voltage data to 100 Hz.
-
-        Takes one window of raw samples, estimates the original sampling rate,
-        and returns a new (time, voltage) pair downsampled to ``self.target_fs``.
+        signal: np.ndarray,
+        original_fs: float,
+    ) -> np.ndarray:
+        """Downsample a single 1-D signal from original_fs to target_fs.
 
         Args:
-            times:    1-D array of timestamps (seconds) for this window.
-            voltages: 1-D array of voltage values for this window.
+            signal:      1-D voltage array for one channel.
+            original_fs: Original sampling rate in Hz.
 
         Returns:
-            (ds_times, ds_voltages) — downsampled NumPy arrays at ``target_fs``.
+            Downsampled 1-D voltage array.
         """
-        times = np.asarray(times, dtype=np.float64)
-        voltages = np.asarray(voltages, dtype=np.float64)
-
-        if len(times) != len(voltages):
-            raise ValueError(
-                f"times and voltages must have the same length, "
-                f"got {len(times)} and {len(voltages)}."
-            )
-        if len(times) < 2:
-            raise ValueError("Window must contain at least 2 samples.")
-
-        original_fs = self._estimate_fs(times)
-
-        # Already at or below target — return as-is
-        if original_fs <= self.target_fs:
-            return times.copy(), voltages.copy()
-
         ratio = original_fs / self.target_fs
 
         if ratio == int(ratio) and int(ratio) >= 2:
-            # Integer decimation (anti-alias filter built in)
             q = int(ratio)
-            ds_voltages = decimate(voltages, q, zero_phase=True)
-            ds_times = times[::q][: len(ds_voltages)]
+            return decimate(signal, q, zero_phase=True)
         else:
-            # Arbitrary ratio — resample to nearest output length
-            n_out = max(1, int(round(len(voltages) * self.target_fs / original_fs)))
-            ds_voltages = resample(voltages, n_out)
+            n_out = max(1, int(round(len(signal) * self.target_fs / original_fs)))
+            return resample(signal, n_out)
+
+    def downsample_window(self, data: np.ndarray) -> np.ndarray:
+        """Downsample a multi-channel window to ``target_fs`` (default 100 Hz).
+
+        Input and output have the **same shape convention**:
+            rows    = time samples
+            columns = channels  (column 0 is time, columns 1..N are voltage channels)
+
+        The returned array has the same number of columns and the same
+        column meaning; only the number of rows (time samples) is reduced.
+
+        Args:
+            data: 2-D array of shape (n_samples, 1 + n_channels).
+                  Column 0  — timestamps (seconds).
+                  Columns 1…N — voltage channels.
+
+        Returns:
+            Downsampled 2-D array with the same column layout
+            (n_downsampled_samples, 1 + n_channels).
+        """
+        data = np.asarray(data, dtype=np.float64)
+
+        if data.ndim != 2 or data.shape[1] < 2:
+            raise ValueError(
+                "data must be a 2-D array with at least 2 columns "
+                "(time + at least one voltage channel)."
+            )
+        if data.shape[0] < 2:
+            raise ValueError("Window must contain at least 2 time samples (rows).")
+
+        times = data[:, 0]
+        original_fs = self._estimate_fs(times)
+
+        # Already at or below target — return a copy with identical shape
+        if original_fs <= self.target_fs:
+            return data.copy()
+
+        # Downsample each voltage channel independently
+        n_channels = data.shape[1] - 1
+        ds_channels = [
+            self._downsample_single_channel(data[:, ch + 1], original_fs)
+            for ch in range(n_channels)
+        ]
+
+        # Build downsampled time column to match the new length
+        n_out = len(ds_channels[0])
+        ratio = original_fs / self.target_fs
+
+        if ratio == int(ratio) and int(ratio) >= 2:
+            ds_times = times[:: int(ratio)][:n_out]
+        else:
             ds_times = np.linspace(times[0], times[-1], n_out)
 
-        return ds_times, ds_voltages
+        # Reassemble into the same (n_samples, 1 + n_channels) layout
+        out = np.column_stack([ds_times] + ds_channels)
+        return out
