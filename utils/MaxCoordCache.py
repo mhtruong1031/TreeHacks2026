@@ -4,12 +4,6 @@ from typing import Any
 
 
 class MaxNCoordCache:
-    """Max-heap by coordination_index with recency tiebreaker within epsilon.
-
-    When two nodes have coordination_index within `epsilon`, the more recently
-    added one ranks higher.
-    """
-
     def __init__(self, epsilon: float = 0.1):
         # Heap entries: (key, (coordination_index, activation_window))
         # key = (-bucket, -insertion_id) so higher coord wins, then more recent wins
