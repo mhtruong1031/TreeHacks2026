@@ -1,20 +1,21 @@
 """
-Test: simulate a live stream and feed it through PreprocessingPipeline.
+End-to-end test: simulated EEG stream → PreprocessingPipeline.
 
-The StreamSimulator delivers packets of raw voltage (shape: packet_size x n_channels).
-This script accumulates those packets into windows with the shape that
-PreprocessingPipeline.downsample_window expects:
+The StreamSimulator delivers packets of raw voltage (packet_size × n_channels).
+This script accumulates those packets into windows shaped for the pipeline:
 
     (n_samples, 1 + n_channels)
     column 0      = timestamps (seconds)
     columns 1…N   = voltage channels
 
-Each time a full window is ready, it is downsampled from the original fs
-to the pipeline's target_fs (100 Hz by default) and the filters are applied.
+Each full window is downsampled to the pipeline's target_fs (100 Hz default),
+then lowpass + bandstop filters are applied.  Raw vs filtered results are
+plotted at the end.
 
 Usage:
-    python test_stream_to_pipeline.py
-    python test_stream_to_pipeline.py --csv ../10_raw.csv --fs 200 --window 1.0 --speed 0
+    python -m simulation.test_stream_pipeline
+    python simulation/test_stream_pipeline.py
+    python simulation/test_stream_pipeline.py --csv ../10_raw.csv --fs 200 --window 1.0 --speed 0
 """
 
 import sys
@@ -23,11 +24,11 @@ import argparse
 
 import numpy as np
 
-# ── Make sure we can import from sibling directories ──────────────────
-sys.path.insert(0, os.path.dirname(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "analysis"))
+# ── Ensure sibling packages are importable ────────────────────────────
+_project_root = os.path.dirname(os.path.dirname(__file__))
+sys.path.insert(0, _project_root)
 
-from simulate_stream import StreamSimulator
+from simulation.simulate_eeg_stream import StreamSimulator
 from analysis.PreprocessingPipeline import PreprocessingPipeline
 
 
@@ -45,52 +46,41 @@ class StreamToPipeline:
         self.window_size = int(window_seconds * fs)
         self.pipeline = PreprocessingPipeline(target_fs=target_fs)
 
-        self.buffer = None          # will be initialized on first packet
-        self.sample_index = 0       # running count of all samples received
-        self.window_count = 0       # how many windows have been processed
+        self.buffer = None
+        self.sample_index = 0
+        self.window_count = 0
 
-        # Store all raw and filtered data for plotting
         self.raw_windows = []
         self.filtered_windows = []
 
     def on_packet(self, packet: np.ndarray):
-        """Callback for StreamSimulator — receives (packet_size, n_channels).
-
-        Accumulates samples and, whenever a full window is ready,
-        runs it through the preprocessing pipeline.
-        """
-        # Initialize buffer on the first packet
+        """Callback for StreamSimulator — receives (packet_size, n_channels)."""
         if self.buffer is None:
             n_channels = packet.shape[1]
-            # Pre-allocate a buffer large enough for one window
             self.buffer = np.empty((self.window_size, n_channels), dtype=np.float64)
             self.buf_pos = 0
             print(f"\n  Pipeline initialized: {n_channels} channels, "
-                  f"window={self.window_size} samples ({self.window_size/self.fs:.2f}s), "
+                  f"window={self.window_size} samples ({self.window_size / self.fs:.2f}s), "
                   f"target_fs={self.pipeline.target_fs} Hz\n")
 
-        # Append packet samples to the buffer
         n_new = packet.shape[0]
         space = self.window_size - self.buf_pos
 
         if n_new <= space:
-            self.buffer[self.buf_pos : self.buf_pos + n_new] = packet
+            self.buffer[self.buf_pos:self.buf_pos + n_new] = packet
             self.buf_pos += n_new
             self.sample_index += n_new
         else:
-            # Fill the remaining space, process, then start fresh
-            self.buffer[self.buf_pos : self.buf_pos + space] = packet[:space]
+            self.buffer[self.buf_pos:self.buf_pos + space] = packet[:space]
             self.buf_pos = self.window_size
             self.sample_index += space
             self._process_window()
 
-            # Put the leftover samples into the next window
             leftover = packet[space:]
             self.buf_pos = leftover.shape[0]
             self.buffer[:self.buf_pos] = leftover
             self.sample_index += leftover.shape[0]
 
-        # If the buffer is exactly full, process it
         if self.buf_pos == self.window_size:
             self._process_window()
 
@@ -99,50 +89,42 @@ class StreamToPipeline:
         self.window_count += 1
         n_channels = self.buffer.shape[1]
 
-        # ── Build the (n_samples, 1+n_channels) array ────────────────
-        #     column 0 = timestamps, columns 1..N = voltages
         t_start = (self.sample_index - self.window_size) / self.fs
         times = t_start + np.arange(self.window_size) / self.fs
         window_data = np.column_stack([times, self.buffer[:self.window_size]])
 
-        # ── Stage 1: Downsample ──────────────────────────────────────
+        # Stage 1: Downsample
         downsampled = self.pipeline.downsample_window(window_data)
 
-        # ── Stage 2: Filters (applied per-channel on the downsampled data) ──
+        # Stage 2: Filters (per-channel on the downsampled data)
         ds_fs = self.pipeline.target_fs
         n_ds_samples = downsampled.shape[0]
         filtered = downsampled.copy()
 
         for ch in range(1, n_channels + 1):
             sig = filtered[:, ch]
-            # Only apply filters if we have enough samples
-            if n_ds_samples >= 13:     # minimum for order-4 filtfilt
+            if n_ds_samples >= 13:  # minimum for order-4 filtfilt
                 sig = self.pipeline.lowpass_blink_filter(sig, ds_fs)
                 sig = self.pipeline.bandstop_sweat_filter(sig, ds_fs)
             filtered[:, ch] = sig
 
-        # ── Save for plotting ────────────────────────────────────────
         self.raw_windows.append(window_data.copy())
         self.filtered_windows.append(filtered.copy())
 
-        # ── Report ───────────────────────────────────────────────────
         print(f"  Window {self.window_count:>4}  |  "
-              f"t=[{window_data[0,0]:7.2f}s - {window_data[-1,0]:7.2f}s]  |  "
+              f"t=[{window_data[0, 0]:7.2f}s - {window_data[-1, 0]:7.2f}s]  |  "
               f"raw {window_data.shape} -> ds {downsampled.shape} -> filtered {filtered.shape}")
 
-        # Show a snippet of the filtered output
         if self.window_count <= 3:
             print(f"    First row (time + channels): {filtered[0]}")
             print(f"    Last  row (time + channels): {filtered[-1]}")
             print()
 
-        # Reset buffer position for the next window
         self.buf_pos = 0
 
     def flush(self):
         """Process any remaining samples in the buffer (partial window)."""
         if self.buffer is not None and self.buf_pos >= 2:
-            # Trim the buffer to actual data
             old_ws = self.window_size
             self.window_size = self.buf_pos
             self._process_window()
@@ -150,18 +132,12 @@ class StreamToPipeline:
             print("  (flushed partial window)")
 
 
-def plot_before_after(raw_windows, filtered_windows):
-    """Plot raw vs filtered time-series for every channel, side by side.
-
-    Args:
-        raw_windows:      list of (n_samples, 1+n_ch) arrays (col 0 = time).
-        filtered_windows: list of (n_samples, 1+n_ch) arrays (col 0 = time).
-    """
+def plot_raw_vs_filtered(raw_windows, filtered_windows):
+    """Plot raw vs filtered time-series for every channel, side by side."""
     import matplotlib.pyplot as plt
 
-    # Concatenate all windows into continuous arrays
-    raw = np.vstack(raw_windows)            # (total_raw_samples, 1+n_ch)
-    filt = np.vstack(filtered_windows)      # (total_filt_samples, 1+n_ch)
+    raw = np.vstack(raw_windows)
+    filt = np.vstack(filtered_windows)
 
     n_channels = raw.shape[1] - 1
     raw_t = raw[:, 0]
@@ -170,15 +146,12 @@ def plot_before_after(raw_windows, filtered_windows):
     fig, axes = plt.subplots(n_channels, 2,
                              figsize=(16, 3 * n_channels),
                              sharex="col")
-
-    # Handle single-channel edge case
     if n_channels == 1:
         axes = axes.reshape(1, 2)
 
     fig.suptitle("Before (Raw) vs After (Filtered + Downsampled)", fontsize=14, y=1.0)
 
     for ch in range(n_channels):
-        # ── Left column: Raw ──────────────────────────────────────
         ax_raw = axes[ch][0]
         ax_raw.plot(raw_t, raw[:, ch + 1], linewidth=0.4, color="steelblue")
         ax_raw.set_ylabel(f"Ch {ch} (uV)", fontsize=9)
@@ -186,7 +159,6 @@ def plot_before_after(raw_windows, filtered_windows):
         if ch == 0:
             ax_raw.set_title("Raw (before)", fontsize=11)
 
-        # ── Right column: Filtered ────────────────────────────────
         ax_filt = axes[ch][1]
         ax_filt.plot(filt_t, filt[:, ch + 1], linewidth=0.4, color="tomato")
         ax_filt.grid(True, alpha=0.3)
@@ -201,7 +173,7 @@ def plot_before_after(raw_windows, filtered_windows):
     plt.show()
 
 
-# ── Main ──────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -222,16 +194,13 @@ if __name__ == "__main__":
     max_s = None if args.max_seconds < 0 else args.max_seconds
 
     handler = StreamToPipeline(fs=args.fs, window_seconds=args.window)
-
     sim = StreamSimulator(args.csv, fs=args.fs, packet_size=10)
     sim.run(callback=handler.on_packet, speed=args.speed, max_seconds=max_s)
-
     handler.flush()
 
     print("\n" + "=" * 70)
     print(f"  Done.  Processed {handler.window_count} windows.")
     print("=" * 70)
 
-    # ── Plot before vs after ──────────────────────────────────────────
     if handler.raw_windows and handler.filtered_windows:
-        plot_before_after(handler.raw_windows, handler.filtered_windows)
+        plot_raw_vs_filtered(handler.raw_windows, handler.filtered_windows)

@@ -1,23 +1,24 @@
 """
 Simulate a live EEG data stream by replaying a raw CSV file in packets.
 
-Loads a CSV with an arbitrary number of channels (auto-detected from
-the file) and feeds it to a callback one packet at a time, paced at
-the real sampling rate (adjustable with a speed multiplier).
-Channels are labelled 0, 1, 2, 3, …
+Loads a headerless CSV with an arbitrary number of channels (auto-detected)
+and feeds it to a callback one packet at a time, paced at the real sampling
+rate (adjustable with a speed multiplier).
 
-Usage:
-    # Standalone test — just prints packet info
-    python simulate_stream.py
+Usage (standalone test — prints packet info):
+    python -m simulation.simulate_eeg_stream
+    python simulation/simulate_eeg_stream.py --csv path/to/data.csv
 
-    # Or import and wire up to your pipeline:
-    #   from simulate_stream import StreamSimulator
-    #   sim = StreamSimulator("../10_raw.csv", fs=200, packet_size=10)
-    #   sim.run(callback=my_pipeline.run, speed=5.0)
+Usage (import into another script):
+    from simulation.simulate_eeg_stream import StreamSimulator
+
+    sim = StreamSimulator("data.csv", fs=200, packet_size=10)
+    sim.run(callback=my_pipeline.ingest, speed=5.0)
 """
 
 import time
 import argparse
+
 import numpy as np
 
 
@@ -70,8 +71,7 @@ class StreamSimulator:
                          where packet is an ndarray of shape (packet_size, n_channels).
                          If None, packets are just printed / counted.
             speed:       Playback speed multiplier (default 1.0 = real-time).
-                         Use e.g. 10.0 to replay 10x faster, or 0 for no delay
-                         (as fast as possible).
+                         Use e.g. 10.0 to replay 10x faster, or 0 for no delay.
             max_seconds: Optional cap on how many seconds of data to stream
                          (in *data* time, not wall-clock time).  None = all.
             verbose:     Print progress every second of data time.
@@ -82,7 +82,7 @@ class StreamSimulator:
 
         delay_per_packet = (self.packet_size / self.fs) / speed if speed > 0 else 0
         n_packets = n_total // self.packet_size
-        report_interval = max(1, int(self.fs / self.packet_size))  # ~every 1s of data
+        report_interval = max(1, int(self.fs / self.packet_size))
 
         print(f"Streaming {n_packets:,} packets  |  speed: {speed}x  |  "
               f"delay/packet: {delay_per_packet * 1000:.2f} ms")
@@ -95,7 +95,7 @@ class StreamSimulator:
             for i in range(n_packets):
                 start_idx = i * self.packet_size
                 end_idx = start_idx + self.packet_size
-                packet = self.data[start_idx:end_idx]  # shape (packet_size, n_channels)
+                packet = self.data[start_idx:end_idx]
 
                 if callback is not None:
                     callback(packet)
@@ -124,7 +124,7 @@ class StreamSimulator:
         print(f"  Effective speed:   {(samples_sent / self.fs) / elapsed:.1f}x real-time")
 
 
-# ── Default callback for standalone testing ──────────────────────────
+# ── Default callback for standalone testing ───────────────────────────
 def _print_callback(packet):
     """Simple callback that prints the first sample of each packet."""
     vals = ", ".join(f"{i}:{v:+.4f}" for i, v in enumerate(packet[0]))
@@ -133,31 +133,21 @@ def _print_callback(packet):
 
 # ── CLI entry point ──────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simulate live EEG data stream")
-    parser.add_argument(
-        "--csv", type=str, default="../10_raw.csv",
-        help="Path to the raw CSV file (default: ../10_raw.csv)",
+    parser = argparse.ArgumentParser(
+        description="Simulate a live EEG data stream by replaying a CSV file",
     )
-    parser.add_argument(
-        "--fs", type=float, default=200.0,
-        help="Sampling rate in Hz (default: 200)",
-    )
-    parser.add_argument(
-        "--packet-size", type=int, default=10,
-        help="Samples per packet (default: 10)",
-    )
-    parser.add_argument(
-        "--speed", type=float, default=10.0,
-        help="Playback speed multiplier (default: 10x, use 0 for max speed)",
-    )
-    parser.add_argument(
-        "--max-seconds", type=float, default=5.0,
-        help="Max seconds of data to stream (default: 5s, use -1 for all)",
-    )
-    parser.add_argument(
-        "--quiet", action="store_true",
-        help="Suppress per-packet printing (still shows progress)",
-    )
+    parser.add_argument("--csv", type=str, default="../10_raw.csv",
+                        help="Path to the raw CSV file (default: ../10_raw.csv)")
+    parser.add_argument("--fs", type=float, default=200.0,
+                        help="Sampling rate in Hz (default: 200)")
+    parser.add_argument("--packet-size", type=int, default=10,
+                        help="Samples per packet (default: 10)")
+    parser.add_argument("--speed", type=float, default=10.0,
+                        help="Playback speed multiplier (default: 10x, 0 = max)")
+    parser.add_argument("--max-seconds", type=float, default=5.0,
+                        help="Max seconds of data to stream (default: 5s, -1 = all)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress per-packet printing (still shows progress)")
     args = parser.parse_args()
 
     max_s = None if args.max_seconds < 0 else args.max_seconds
