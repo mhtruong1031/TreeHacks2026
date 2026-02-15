@@ -38,8 +38,8 @@ SAMPLING_RATE_HZ = 200
 TRIAL_DURATION_S = 10.0
 N_SAMPLES_PER_TRIAL = int(SAMPLING_RATE_HZ * TRIAL_DURATION_S)
 
-CHANNEL_NAMES = ["ch0_eeg", "ch1_eeg", "ch2_emg", "ch3_emg"]
-CHANNEL_UNITS = ["uV", "uV", "mV", "mV"]
+CHANNEL_NAMES = ["ch0_eeg", "ch1_eeg", "ch2_eeg", "ch3_emg"]
+CHANNEL_UNITS = ["uV", "uV", "uV", "mV"]
 
 CLASS_NAMES = ("rest", "motor_imagery", "wrist_flex_ext", "grip_release", "cocontraction")
 
@@ -105,46 +105,62 @@ def add_line_noise(x: np.ndarray, fs: float, freq: float = 60.0, amp: float = 0.
 def generate_trial(class_name: str, fs: float, duration_s: float, rng) -> tuple:
     """Synthesize one trial of (4-channel data, event list) for the given class.
 
+    Channel layout:
+        ch0_eeg — frontal / motor-cortex EEG (µV)
+        ch1_eeg — central / sensorimotor EEG (µV)
+        ch2_eeg — parietal / posterior EEG (µV)
+        ch3_emg — forearm muscle EMG (mV)
+
     Returns:
-        data:   np.ndarray of shape (4, n_samples) — [eeg0, eeg1, emg0, emg1]
+        data:   np.ndarray of shape (4, n_samples) — [eeg0, eeg1, eeg2, emg]
         events: list of (onset_s, duration_s, label) tuples
     """
     n = int(fs * duration_s)
     t = np.arange(n) / fs
 
-    # Base EEG: pinkish background
-    eeg0 = 0.6 * pinkish_noise(n, rng)
-    eeg1 = 0.6 * pinkish_noise(n, rng)
+    # ── Base signals ──────────────────────────────────────────────
+    # Three EEG channels: independent pinkish (1/f) backgrounds
+    eeg0 = 0.6 * pinkish_noise(n, rng)   # frontal
+    eeg1 = 0.6 * pinkish_noise(n, rng)   # central
+    eeg2 = 0.6 * pinkish_noise(n, rng)   # parietal
 
-    # Base EMG: low-level broadband tone
-    emg0 = 0.15 * band_limited_noise(n, fs, 20, 120, rng)
-    emg1 = 0.15 * band_limited_noise(n, fs, 20, 120, rng)
+    # One EMG channel: low-level broadband baseline tone
+    emg = 0.15 * band_limited_noise(n, fs, 20, 120, rng)
 
     events = []
 
     # ── Class-specific shaping ────────────────────────────────────
     if class_name == "rest":
+        # Strong alpha (8-12 Hz) across all EEG, strongest in parietal;
+        # EMG stays at baseline.
         alpha_f = rng.uniform(8.5, 11.5)
-        alpha = np.sin(2 * np.pi * alpha_f * t)
-        eeg0 += 1.2 * alpha
+        eeg0 += 0.7 * np.sin(2 * np.pi * alpha_f * t)
         eeg1 += 0.9 * np.sin(2 * np.pi * (alpha_f + rng.uniform(-0.3, 0.3)) * t)
+        eeg2 += 1.2 * np.sin(2 * np.pi * (alpha_f + rng.uniform(-0.2, 0.2)) * t)
         events.append((0.0, duration_s, "rest"))
 
     elif class_name == "motor_imagery":
+        # Mu/alpha suppression mid-trial in central + frontal;
+        # beta rebound in parietal; EMG stays quiet.
         alpha_f = rng.uniform(9.0, 12.0)
         beta_f = rng.uniform(18.0, 26.0)
         alpha = np.sin(2 * np.pi * alpha_f * t)
         beta = np.sin(2 * np.pi * beta_f * t)
+
+        # Envelope: strong alpha early/late, suppressed in the middle
         env = smooth_envelope(n, fs, [(0.0, 3.0, 1.0), (3.0, 7.0, 0.35), (7.0, 10.0, 1.0)])
-        eeg0 += 1.0 * env * alpha + 0.25 * beta
-        eeg1 += 0.8 * env * np.sin(2 * np.pi * (alpha_f + 0.4) * t) + 0.25 * np.sin(2 * np.pi * (beta_f - 1.2) * t)
-        emg0 *= 0.5
-        emg1 *= 0.5
+        eeg0 += 0.8 * env * alpha + 0.20 * beta
+        eeg1 += 1.0 * env * np.sin(2 * np.pi * (alpha_f + 0.4) * t) + 0.30 * beta
+        eeg2 += 0.6 * env * np.sin(2 * np.pi * (alpha_f - 0.3) * t) + 0.35 * np.sin(2 * np.pi * (beta_f - 1.2) * t)
+
+        emg *= 0.5  # EMG stays quiet during imagery
         events.append((0.0, 3.0, "rest"))
         events.append((3.0, 4.0, "imagery"))
         events.append((7.0, 3.0, "rest"))
 
     elif class_name == "wrist_flex_ext":
+        # Alternating EMG bursts (flex/extend on single muscle channel);
+        # EEG shows beta desync during movement windows.
         cycles = [
             (1.0, 2.0, "flex"),    (2.5, 3.5, "extend"),
             (4.0, 5.0, "flex"),    (5.5, 6.5, "extend"),
@@ -152,41 +168,56 @@ def generate_trial(class_name: str, fs: float, duration_s: float, rng) -> tuple:
         ]
         flex_env = smooth_envelope(n, fs, [(a, b, 1.0) for a, b, lab in cycles if lab == "flex"])
         ext_env  = smooth_envelope(n, fs, [(a, b, 1.0) for a, b, lab in cycles if lab == "extend"])
-        emg0 += 1.2 * flex_env * band_limited_noise(n, fs, 25, 150, rng)
-        emg1 += 1.2 * ext_env  * band_limited_noise(n, fs, 25, 150, rng)
+        combined_env = np.clip(flex_env + ext_env, 0, 1)
+
+        # EMG: alternating bursts with slightly different amplitudes
+        emg += 1.2 * flex_env * band_limited_noise(n, fs, 25, 150, rng)
+        emg += 0.9 * ext_env  * band_limited_noise(n, fs, 25, 150, rng)
+
+        # EEG: beta desynchronization during movement
         beta_f = rng.uniform(18, 24)
-        move_env = np.clip(flex_env + ext_env, 0, 1)
-        eeg0 += 0.25 * move_env * np.sin(2 * np.pi * beta_f * t)
-        eeg1 += 0.20 * move_env * np.sin(2 * np.pi * (beta_f + 1.0) * t)
+        eeg0 += 0.25 * combined_env * np.sin(2 * np.pi * beta_f * t)
+        eeg1 += 0.30 * combined_env * np.sin(2 * np.pi * (beta_f + 1.0) * t)
+        eeg2 += 0.15 * combined_env * np.sin(2 * np.pi * (beta_f - 0.5) * t)
+
         events.append((0.0, 1.0, "rest"))
         for a, b, lab in cycles:
             events.append((a, b - a, lab))
         events.append((9.5, 0.5, "rest"))
 
     elif class_name == "grip_release":
+        # Sustained grip → release on a single EMG channel;
+        # EEG shows movement-related beta modulation.
         grip    = smooth_envelope(n, fs, [(2.0, 6.0, 1.0)])
         release = smooth_envelope(n, fs, [(6.0, 8.5, 0.6)])
         emg_env = np.clip(grip + release, 0, 1.0)
-        emg0 += 1.6 * emg_env * band_limited_noise(n, fs, 30, 180, rng)
-        emg1 += 1.4 * emg_env * band_limited_noise(n, fs, 30, 180, rng)
+
+        emg += 1.5 * emg_env * band_limited_noise(n, fs, 30, 180, rng)
+
         beta_f = rng.uniform(16, 24)
-        eeg0 += 0.2 * emg_env * np.sin(2 * np.pi * beta_f * t)
-        eeg1 += 0.15 * emg_env * np.sin(2 * np.pi * (beta_f + 0.8) * t)
+        eeg0 += 0.20 * emg_env * np.sin(2 * np.pi * beta_f * t)
+        eeg1 += 0.25 * emg_env * np.sin(2 * np.pi * (beta_f + 0.8) * t)
+        eeg2 += 0.10 * emg_env * np.sin(2 * np.pi * (beta_f - 0.6) * t)
+
         events.append((0.0, 2.0, "rest"))
         events.append((2.0, 4.0, "grip"))
         events.append((6.0, 2.5, "release"))
         events.append((8.5, 1.5, "rest"))
 
     elif class_name == "cocontraction":
+        # Sustained co-activation: high EMG baseline + burst;
+        # EEG picks up low-freq tension drift.
         base_tone = 0.25 * band_limited_noise(n, fs, 15, 80, rng)
-        emg0 += base_tone
-        emg1 += base_tone
+        emg += base_tone
+
         co = smooth_envelope(n, fs, [(1.5, 8.5, 1.0)])
-        emg0 += 1.1 * co * band_limited_noise(n, fs, 25, 150, rng)
-        emg1 += 1.1 * co * band_limited_noise(n, fs, 25, 150, rng)
+        emg += 1.1 * co * band_limited_noise(n, fs, 25, 150, rng)
+
         drift = 0.15 * np.cumsum(rng.standard_normal(n)) / n
         eeg0 += drift
         eeg1 += 0.8 * drift
+        eeg2 += 0.5 * drift
+
         events.append((0.0, 1.5, "rest"))
         events.append((1.5, 7.0, "cocontraction"))
         events.append((8.5, 1.5, "rest"))
@@ -194,19 +225,19 @@ def generate_trial(class_name: str, fs: float, duration_s: float, rng) -> tuple:
     else:
         raise ValueError(f"Unknown class: {class_name}")
 
-    # Add mild 60 Hz line noise to all channels
+    # ── Add mild 60 Hz line noise to all channels ─────────────────
     eeg0 = add_line_noise(eeg0, fs, 60.0, amp=0.03)
     eeg1 = add_line_noise(eeg1, fs, 60.0, amp=0.03)
-    emg0 = add_line_noise(emg0, fs, 60.0, amp=0.01)
-    emg1 = add_line_noise(emg1, fs, 60.0, amp=0.01)
+    eeg2 = add_line_noise(eeg2, fs, 60.0, amp=0.03)
+    emg  = add_line_noise(emg,  fs, 60.0, amp=0.01)
 
-    # Scale to realistic units (EEG ~µV, EMG ~mV)
+    # ── Scale to realistic units (EEG ~µV, EMG ~mV) ──────────────
     eeg0_uV = 20.0 * eeg0
     eeg1_uV = 20.0 * eeg1
-    emg0_mV = 1.0 * emg0
-    emg1_mV = 1.0 * emg1
+    eeg2_uV = 20.0 * eeg2
+    emg_mV  = 1.0  * emg
 
-    data = np.vstack([eeg0_uV, eeg1_uV, emg0_mV, emg1_mV]).astype(np.float32)
+    data = np.vstack([eeg0_uV, eeg1_uV, eeg2_uV, emg_mV]).astype(np.float32)
     return data, events
 
 
