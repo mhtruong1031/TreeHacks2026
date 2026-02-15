@@ -2,12 +2,13 @@ import heapq
 import math
 from dataclasses import dataclass
 from typing import Any
+import numpy as np
 
 
 @dataclass
 class Node:
     coordination_index: float
-    activation_window: Any
+    activation_window: tuple[int, int]
     similarity_score: float
 
 
@@ -18,9 +19,13 @@ class MaxNCoordCache:
         self._heap: list[tuple[tuple[float, int], Node]] = []
         self._epsilon = epsilon
         self._insertion_id = 0
-        self.predicted_ideal = None
+        self.predicted_ideal: Node = None
+        self.predicted_ideal_data: np.ndarray = None
 
-    def add_node(self, coordination_index: float, activation_window: Any) -> None:
+    def __len__(self) -> int:
+        return len(self._heap)
+
+    def add_node(self, coordination_index: float, activation_window: Any, is_predicted_ideal: bool = False) -> None:
         self._insertion_id += 1
         # Bucket by epsilon so coords within epsilon compare by recency
         bucket = math.floor(coordination_index / self._epsilon) * self._epsilon

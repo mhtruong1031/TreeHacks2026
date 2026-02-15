@@ -1,6 +1,9 @@
 import numpy as np
 from tslearn.metrics import dtw
 
+from utils.MaxCoordCache import MaxNCoordCache, Node
+from typing import Any
+
 class PresentPipeline:
     def __init__(self):
         pass
@@ -72,14 +75,17 @@ class PresentPipeline:
 
         return similarity_scores / len(current_data[0])
     
-    def update_similarity_scores(self, all_data: np.ndarray, activation_window: Any, n_nodes: int = 5) -> float:
-        top_nodes = self.max_n_coord_cache.get_top_n_nodes(n=n_nodes)
+    def update_similarity_scores(self, cache: MaxNCoordCache, all_data: np.ndarray, activation_window: Any, n_nodes: int = 5) -> float:
+        top_nodes = cache.get_top_n_nodes(n=n_nodes)
+        current_data   = all_data[activation_window[0]:activation_window[1]]
         for node in top_nodes:
-            if node.activation_window.equals(activation_window):
+            if node.activation_window == activation_window:
                 continue
-
-            current_data   = all_data[activation_window[0]:activation_window[1]]
+            
             reference_data = all_data[node.activation_window[0]:node.activation_window[1]]
             
             node.similarity_score = self.get_similarity_score(current_data, reference_data)
+
+        if cache.predicted_ideal:
+            cache.predicted_ideal.similarity_score = self.get_similarity_score(current_data, cache.predicted_ideal_data)
 

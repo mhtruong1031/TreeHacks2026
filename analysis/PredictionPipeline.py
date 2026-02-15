@@ -6,10 +6,10 @@ from utils.Model import Model
 from torch.utils.data import DataLoader, TensorDataset
 
 class PredictionPipeline:
-    def __init__(self, input_size: int = 1, hidden_size: int = 32, num_layers: int = 2):
+    def __init__(self):
         self.model = None
 
-        #Hyperparameters
+        # Hyperparameters
         self.learning_rate = 0.001
         self.batch_size = 1
         self.epochs = 20 
@@ -17,7 +17,11 @@ class PredictionPipeline:
         self.loss_function = nn.MSELoss()
 
     def run(self, data):
-        pass
+        if not self.model:
+            self.train_initial_model(data)
+            
+        self.add_to_model(data)
+        return self.predict(data)
 
     # Pass in sequential data ordered by coordination index
     def train_initial_model(self, data: np.ndarray):
@@ -47,7 +51,7 @@ class PredictionPipeline:
             for batch_inputs, batch_targets in training_loader:
                 batch_inputs = batch_inputs.to(self.device)
                 batch_targets = batch_targets.to(self.device)
-                optimizer.zero_grad()
+                self.optimizer.zero_grad()
                 outputs = self.model(batch_inputs)
                 # Match output/target shapes if necessary
                 # If model returns (output, _), unpack
@@ -56,13 +60,10 @@ class PredictionPipeline:
                 # If the model produces only last step, but the target is sequence, align here if needed.
                 loss = self.loss_function(outputs, batch_targets)
                 loss.backward()
-                optimizer.step()
+                self.optimizer.step()
                 total_loss += loss.item()
             avg_loss = total_loss / len(training_loader)
             print(f"Epoch {epoch+1}/{self.epochs}, Loss: {avg_loss:.6f}")
-
-        torch.save(self.model.state_dict(), "../cache/neural_prediction_model.pth")
-        return self.model
 
     # Train the model on a new data point
     def add_to_model(self, data: np.ndarray):
@@ -70,6 +71,7 @@ class PredictionPipeline:
             raise RuntimeError("model not initialized; call train_initial_model first")
         if self.optimizer is None:
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+
         self.model.train()
         # Ensure batch dimension: (n_timesteps, n_features) -> (1, n_timesteps, n_features)
         if data.ndim == 2:
