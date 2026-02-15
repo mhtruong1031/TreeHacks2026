@@ -1,6 +1,8 @@
 from PreprocessingPipeline import PreprocessingPipeline
 from PredictionPipeline import PredictionPipeline
 from PresentPipeline import PresentPipeline
+from LLMPipeline import LLMPipeline
+from ProgressMonitor import ProgressMonitor
 
 from utils.MaxCoordCache import MaxNCoordCache, Node
 
@@ -10,7 +12,15 @@ from collections import deque
 class MainPipeline:
     # window size in seconds
     # TODO find activation threshold
-    def __init__(self, window_size_s: float = 0.2, activation_threshold: float = 0.2, prediction_data_threshold: float = 30): # 200hz sampling rate
+    def __init__(
+        self,
+        window_size_s: float = 0.2,
+        activation_threshold: float = 0.2,
+        prediction_data_threshold: float = 30,
+        api_key: str | None = None,
+        movement_class: str = "wrist_flex_ext",
+        personality: str = "encouraging",
+    ):  # 200hz sampling rate
         self.window_size_samples       = int(window_size_s * 200)  # window size in samples   
         self.activation_threshold      = activation_threshold      # neuron activation threshold
         self.prediction_data_threshold = prediction_data_threshold # prediction data threshold
@@ -27,6 +37,20 @@ class MainPipeline:
         self.preprocessing_pipeline = PreprocessingPipeline() # Stage 1
         self.present_pipeline       = PresentPipeline()       # Stage 2
         self.prediction_pipeline    = PredictionPipeline()    # Stage 3
+
+        # Progress monitor (plateau / stagnation detection)
+        self.progress_monitor = ProgressMonitor()
+
+        # LLM coaching assistant (optional — degrades gracefully without key)
+        self.llm_pipeline = None
+        self.latest_llm_response: str | None = None
+        self._movement_class = movement_class
+        if api_key:
+            self.llm_pipeline = LLMPipeline(
+                api_key=api_key,
+                movement_class=movement_class,
+                personality=personality,
+            )
 
     # Current_sample is a packet (single time point)
     def run(self, packet):
@@ -67,6 +91,39 @@ class MainPipeline:
                 self.max_n_coord_cache.predicted_ideal      = Node(coordination_index=0, activation_window=(0, 0), similarity_score=0)
             
             self.present_pipeline.update_similarity_scores(self.max_n_coord_cache, np.array(self.processed_data), activation_window, n_nodes=5) # update top 5 nodes with similarity score
+
+            # --- Progress monitoring + LLM feedback ---
+            # Get similarity score for the current attempt (use the latest node)
+            top_nodes = self.max_n_coord_cache.get_top_n_nodes(1)
+            current_similarity = top_nodes[0].similarity_score if top_nodes else 0.0
+
+            # Check for plateau / stagnation
+            progress_status = self.progress_monitor.add_attempt(coordination_index, current_similarity)
+
+            # Build metrics dict for the LLM
+            if self.llm_pipeline is not None:
+                top_5 = self.max_n_coord_cache.get_top_n_nodes(5)
+                metrics = {
+                    "coordination_index": coordination_index,
+                    "similarity_score": current_similarity,
+                    "attempt_number": len(self.max_n_coord_cache),
+                    "coordination_history": list(self.progress_monitor.coordination_history),
+                    "movement_class": self._movement_class,
+                    "trend": progress_status["trend"],
+                    "top_n_scores": [
+                        {
+                            "coordination_index": n.coordination_index,
+                            "similarity_score": n.similarity_score,
+                        }
+                        for n in top_5
+                    ],
+                    "has_prediction_model": self.prediction_pipeline.model is not None,
+                    "plateau_detected": progress_status["plateau_detected"],
+                    "plateau_type": progress_status["plateau_type"],
+                    "plateau_details": progress_status["details"],
+                }
+
+                self.latest_llm_response = self.llm_pipeline.generate_feedback(metrics)
                 
     
     def check_activation(self):
@@ -89,6 +146,45 @@ class MainPipeline:
             np.array(self.processed_data[node.activation_window[0]:node.activation_window[1]])
             for node in nodes
         ]
+
+    # ------------------------------------------------------------------
+    # LLM convenience methods
+    # ------------------------------------------------------------------
+
+    def ask_llm(self, question: str) -> str | None:
+        """Forward a user question to the LLM coaching assistant."""
+        if self.llm_pipeline is None:
+            return None
+
+        # Build current metrics snapshot for context
+        top_5 = self.max_n_coord_cache.get_top_n_nodes(5)
+        metrics = {
+            "coordination_history": list(self.progress_monitor.coordination_history),
+            "movement_class": self._movement_class,
+            "attempt_number": len(self.max_n_coord_cache),
+            "trend": self.progress_monitor.get_trend(),
+            "top_n_scores": [
+                {
+                    "coordination_index": n.coordination_index,
+                    "similarity_score": n.similarity_score,
+                }
+                for n in top_5
+            ],
+            "has_prediction_model": self.prediction_pipeline.model is not None,
+        }
+        return self.llm_pipeline.ask(question, current_metrics=metrics)
+
+    def set_personality(self, personality: str) -> None:
+        """Switch the LLM coaching personality."""
+        if self.llm_pipeline is not None:
+            self.llm_pipeline.set_personality(personality)
+
+    def set_movement_class(self, movement_class: str) -> None:
+        """Update the current exercise and reset the progress monitor."""
+        self._movement_class = movement_class
+        self.progress_monitor.reset()
+        if self.llm_pipeline is not None:
+            self.llm_pipeline.set_movement_class(movement_class)
 
 
 

@@ -1,0 +1,6 @@
+numpy
+scipy
+torch
+tslearn
+matplotlib
+google-genai
