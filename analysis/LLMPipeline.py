@@ -2,7 +2,6 @@ from google import genai
 from google.genai import types
 
 
-API_KEY = "AIzaSyCJ9OhCf9UoMATo4-AeFVlWHatsCE6ZJ-w"
 
 # ---------------------------------------------------------------------------
 # Personality definitions
