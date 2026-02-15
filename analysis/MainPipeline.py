@@ -1,6 +1,8 @@
 from PreprocessingPipeline import PreprocessingPipeline
 from PredictionPipeline import PredictionPipeline
 from PresentPipeline import PresentPipeline
+from ProgressMonitor import ProgressMonitor
+from LLMPipeline import LLMPipeline
 
 from utils.MaxCoordCache import MaxNCoordCache, Node
 
@@ -11,7 +13,19 @@ import threading
 class MainPipeline:
     # window size in seconds
     # TODO find activation threshold
-    def __init__(self, window_size_s: float = 0.2, activation_threshold: float = 0.2, prediction_data_threshold: float = 30): # 200hz sampling rate
+    def __init__(
+        self,
+        window_size_s: float = 0.2,
+        activation_threshold: float = 0.2,
+        prediction_data_threshold: float = 30,
+        max_processed_samples: int = 100_000,
+        calibration=None,
+        use_whitening: bool = False,
+        adaptive_threshold_n_std: float = 2.5,
+        api_key: str | None = None,
+        movement_class: str = "wrist_flex_ext",
+        personality: str = "encouraging",
+    ):  # 200hz sampling rate
         self.window_size_samples       = int(window_size_s * 200)  # window size in samples   
         self.activation_threshold      = activation_threshold      # neuron activation threshold
         self.prediction_data_threshold = prediction_data_threshold # prediction data threshold
@@ -117,8 +131,107 @@ class MainPipeline:
                 self.max_n_coord_cache.predicted_ideal      = Node(coordination_index=0, activation_window=(0, 0), similarity_score=0)
             
             self.present_pipeline.update_similarity_scores(self.max_n_coord_cache, np.array(self.processed_data), activation_window, n_nodes=5) # update top 5 nodes with similarity score
-                
-    
+
+            # ── Plateau / Progress Tracking & LLM Feedback ──────────────
+            # Aggregate the similarity scores that update_similarity_scores
+            # just wrote onto the top cached nodes.  The mean distance from
+            # the current attempt to those nodes is used as the per-attempt
+            # similarity value for plateau detection and novelty counting.
+            similarity_score = self._aggregate_attempt_similarity(activation_window)
+
+            # Feed into progress monitor → returns plateau / trend status
+            progress_status = self.progress_monitor.add_attempt(
+                coordination_index=coordination_index,
+                similarity_score=similarity_score,
+            )
+
+            # If the LLM pipeline is active, build the full metrics dict
+            # and (possibly) generate coaching feedback.
+            if self.llm_pipeline:
+                metrics = self._build_llm_metrics(
+                    coordination_index=coordination_index,
+                    similarity_score=similarity_score,
+                    progress_status=progress_status,
+                )
+                feedback = self.llm_pipeline.generate_feedback(metrics)
+                if feedback:
+                    self.latest_llm_response = feedback
+
+    # ------------------------------------------------------------------
+    # Plateau / LLM helpers
+    # ------------------------------------------------------------------
+
+    def _aggregate_attempt_similarity(self, activation_window) -> float:
+        """Mean similarity (distance) of the current attempt to the top
+        cached nodes.  Re-uses the scores that
+        ``PresentPipeline.update_similarity_scores`` already wrote onto
+        each node — no extra computation needed.
+
+        A **high** value means this attempt is far from the best cached
+        patterns → novel movement.  A **low** value means it closely
+        repeats a known pattern.
+        """
+        with self.cache_lock:
+            top_nodes = self.max_n_coord_cache.get_top_n_nodes(5)
+        scores = [
+            node.similarity_score
+            for node in top_nodes
+            if node.activation_window != activation_window
+            and node.similarity_score > 0
+        ]
+        return float(np.mean(scores)) if scores else 0.0
+
+    def _build_llm_metrics(
+        self,
+        coordination_index: float,
+        similarity_score: float,
+        progress_status: dict,
+    ) -> dict:
+        """Assemble the metrics dictionary consumed by ``LLMPipeline``.
+
+        Combines the current attempt's scores, the progress monitor's
+        summary (novel-movement counts, coordination progression), and
+        the plateau / trend status.
+        """
+        summary = self.progress_monitor.get_progress_summary()
+
+        with self.cache_lock:
+            top_nodes = self.max_n_coord_cache.get_top_n_nodes(5)
+        top_n_scores = [
+            {
+                "coordination_index": n.coordination_index,
+                "similarity_score": n.similarity_score,
+            }
+            for n in top_nodes
+        ]
+
+        return {
+            # Current attempt
+            "coordination_index": coordination_index,
+            "similarity_score": similarity_score,
+            "attempt_number": summary["total_attempts"],
+            "movement_class": self._movement_class,
+            "has_prediction_model": self.prediction_pipeline.model is not None,
+            # Coordination progression
+            "coordination_history": summary["coordination_history_recent"],
+            "trend": progress_status["trend"],
+            "best_coordination_index": summary["best_coordination_index"],
+            "average_coordination_index": summary["average_coordination_index"],
+            "coordination_improvement": summary["coordination_improvement"],
+            "improvement_rate": summary["improvement_rate"],
+            # Novel movement metrics (from similarity scores)
+            "novel_movement_count": summary["novel_movement_count"],
+            "novel_movement_ratio": summary["novel_movement_ratio"],
+            "recent_novel_count": summary["recent_novel_count"],
+            "recent_novel_ratio": summary["recent_novel_ratio"],
+            # Plateau / stagnation
+            "plateau_detected": progress_status["plateau_detected"],
+            "plateau_type": progress_status["plateau_type"],
+            "plateau_details": progress_status["details"],
+            # Top cached attempts
+            "top_n_scores": top_n_scores,
+        }
+
     def check_activation(self):
         current = self.data[-1]
 

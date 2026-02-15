@@ -288,11 +288,14 @@ CURRENT EXERCISE:
 
 METRICS YOU WILL RECEIVE:
 - Coordination Index (float, 0-1): Measures how coordinated the patient's movement is. LOWER is BETTER (0 = perfect coordination). Derived from SVD energy ratio (how much variance is captured by the dominant movement pattern) and bimodality coefficient (whether the signal clusters cleanly).
-- Similarity Score (float): DTW (Dynamic Time Warping) distance comparing the current attempt to the patient's best previous attempts or a predicted ideal. LOWER is BETTER (more consistent with best performance).
+- Similarity Score (float): Mean distance of this attempt to the patient's best previous attempts. LOWER means the attempt closely repeats a known pattern; HIGHER means it is a genuinely novel movement.
 - Attempt Number: How many movement attempts the patient has completed this session.
 - Coordination History: Recent trend of coordination indices.
 - Trend: Whether the patient is "improving", "declining", or on a "plateau".
 - Top-N Scores: The coordination indices and similarity scores of the patient's best cached attempts.
+- Novel Movement Count / Ratio: How many attempts (and what fraction) were classified as genuinely novel — i.e. sufficiently different from previously seen top patterns. A low ratio over many attempts signals the patient is repeating the same motion.
+- Coordination Improvement: The difference between the patient's early and recent coordination indices. Positive = improving. Also provided as a per-attempt rate.
+- Plateau Detection: Whether the session has stagnated — either a coordination plateau (CI flatlined) or low uniqueness (same motion repeated). When a plateau is detected you MUST address it directly.
 
 GUIDELINES:
 - Keep responses concise and actionable (2-5 sentences for regular feedback, up to 5 for interventions).
@@ -319,7 +322,7 @@ GUIDELINES:
 
         sim = metrics.get("similarity_score")
         if sim is not None:
-            lines.append(f"Similarity Score: {sim:.4f}  (lower = more consistent)")
+            lines.append(f"Similarity Score: {sim:.4f}  (higher = more novel)")
 
         trend = metrics.get("trend")
         if trend:
@@ -331,6 +334,41 @@ GUIDELINES:
             formatted = ", ".join(f"{v:.3f}" for v in recent)
             lines.append(f"Last {len(recent)} Coordination Indices: [{formatted}]")
 
+        # ── Coordination progression ──
+        improvement = metrics.get("coordination_improvement")
+        if improvement is not None:
+            direction = "better" if improvement > 0 else "worse"
+            lines.append(
+                f"Coordination Improvement (early → recent): {improvement:+.4f}  ({direction})"
+            )
+
+        rate = metrics.get("improvement_rate")
+        if rate is not None:
+            lines.append(f"Improvement Rate (per attempt): {rate:+.6f}")
+
+        best_ci = metrics.get("best_coordination_index")
+        avg_ci = metrics.get("average_coordination_index")
+        if best_ci is not None and avg_ci is not None:
+            lines.append(f"Best CI: {best_ci:.4f}  |  Session Avg CI: {avg_ci:.4f}")
+
+        # ── Novel movement stats (derived from similarity scores) ──
+        novel_count = metrics.get("novel_movement_count")
+        novel_ratio = metrics.get("novel_movement_ratio")
+        if novel_count is not None:
+            lines.append(
+                f"Novel Movements: {novel_count} / {metrics.get('attempt_number', '?')} "
+                f"({novel_ratio * 100:.1f}% of attempts)"
+            )
+
+        recent_novel = metrics.get("recent_novel_count")
+        recent_novel_ratio = metrics.get("recent_novel_ratio")
+        if recent_novel is not None:
+            lines.append(
+                f"Recent Novel (last window): {recent_novel} "
+                f"({recent_novel_ratio * 100:.1f}%)"
+            )
+
+        # ── Top cached attempts ──
         top_n = metrics.get("top_n_scores")
         if top_n:
             lines.append("Top Cached Attempts:")
@@ -343,9 +381,13 @@ GUIDELINES:
         if has_model is not None:
             lines.append(f"Prediction Model Active: {'Yes' if has_model else 'No'}")
 
+        # ── Plateau / stagnation ──
         plateau = metrics.get("plateau_detected", False)
         if plateau:
             lines.append(f"Plateau Detected: YES — type: {metrics.get('plateau_type', 'unknown')}")
+            details = metrics.get("plateau_details", "")
+            if details:
+                lines.append(f"Plateau Details: {details}")
 
         lines.append("--- End Metrics ---")
         return "\n".join(lines)

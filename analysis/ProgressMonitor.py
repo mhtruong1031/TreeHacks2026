@@ -14,6 +14,7 @@ class ProgressMonitor:
         plateau_window: int = 10,
         plateau_threshold: float = 0.05,
         uniqueness_threshold: float = 0.15,
+        novelty_threshold: float = 0.3,
     ):
         """
         Args:
@@ -26,14 +27,21 @@ class ProgressMonitor:
                 distance) among recent attempts before the session is
                 flagged as low-uniqueness (patient repeating the same
                 motion).
+            novelty_threshold: Minimum mean similarity (distance) to
+                top cached attempts for a movement to be counted as
+                "novel".  A high similarity score means the attempt is
+                far from existing top attempts → genuinely new pattern.
         """
         self.plateau_window = plateau_window
         self.plateau_threshold = plateau_threshold
         self.uniqueness_threshold = uniqueness_threshold
+        self.novelty_threshold = novelty_threshold
 
         # Rolling logs
         self.coordination_history: list[float] = []
         self.similarity_history: list[float] = []
+        self.novelty_flags: list[bool] = []   # True when attempt was novel
+        self.novel_movement_count: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -44,7 +52,12 @@ class ProgressMonitor:
         coordination_index: float,
         similarity_score: float,
     ) -> dict:
-        """Log an attempt and run stagnation detection.
+        """Log an attempt and run stagnation / plateau detection.
+
+        The *similarity_score* is the mean distance of this attempt to the
+        top cached attempts (computed by PresentPipeline).  A **high** value
+        means the attempt is far from the best known patterns → novel.  A
+        **low** value means it closely repeats a prior pattern.
 
         Returns:
             dict with keys:
@@ -56,6 +69,12 @@ class ProgressMonitor:
         """
         self.coordination_history.append(coordination_index)
         self.similarity_history.append(similarity_score)
+
+        # ── Novelty tracking (based on existing similarity score) ──
+        is_novel = similarity_score >= self.novelty_threshold
+        self.novelty_flags.append(is_novel)
+        if is_novel:
+            self.novel_movement_count += 1
 
         trend = self.get_trend()
 
@@ -134,10 +153,66 @@ class ProgressMonitor:
         else:
             return "plateau"
 
+    def get_progress_summary(self) -> dict:
+        """Return a comprehensive snapshot of session progress.
+
+        This is the primary data package that feeds into the LLM
+        coaching pipeline.  It combines coordination progression,
+        novel-movement counts, and summary statistics.
+        """
+        total = len(self.coordination_history)
+
+        # ── Novel movement stats (derived from similarity scores) ──
+        novel_ratio = self.novel_movement_count / total if total > 0 else 0.0
+
+        # How many of the *recent* window were novel?
+        recent_flags = self.novelty_flags[-self.plateau_window:]
+        recent_novel = sum(recent_flags)
+        recent_novel_ratio = recent_novel / len(recent_flags) if recent_flags else 0.0
+
+        # ── Coordination index statistics ──
+        if total > 0:
+            ci_arr = np.array(self.coordination_history)
+            best_ci = float(ci_arr.min())
+            worst_ci = float(ci_arr.max())
+            avg_ci = float(ci_arr.mean())
+
+            # Improvement: compare first N to last N attempts
+            half = max(1, min(5, total // 2))
+            early_mean = float(ci_arr[:half].mean())
+            recent_mean = float(ci_arr[-half:].mean())
+            # Positive value → patient improved (lower CI is better)
+            coordination_improvement = early_mean - recent_mean
+
+            # Per-attempt rate of improvement
+            improvement_rate = coordination_improvement / total
+        else:
+            best_ci = worst_ci = avg_ci = 0.0
+            coordination_improvement = 0.0
+            improvement_rate = 0.0
+
+        return {
+            "total_attempts": total,
+            # Novelty
+            "novel_movement_count": self.novel_movement_count,
+            "novel_movement_ratio": novel_ratio,
+            "recent_novel_count": recent_novel,
+            "recent_novel_ratio": recent_novel_ratio,
+            # Coordination progression
+            "coordination_history_recent": self.coordination_history[-self.plateau_window:],
+            "best_coordination_index": best_ci,
+            "worst_coordination_index": worst_ci,
+            "average_coordination_index": avg_ci,
+            "coordination_improvement": coordination_improvement,
+            "improvement_rate": improvement_rate,
+        }
+
     def reset(self) -> None:
         """Clear all history (e.g. when switching exercises)."""
         self.coordination_history.clear()
         self.similarity_history.clear()
+        self.novelty_flags.clear()
+        self.novel_movement_count = 0
 
     # ------------------------------------------------------------------
     # Internal detection methods
