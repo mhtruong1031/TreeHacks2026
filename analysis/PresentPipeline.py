@@ -1,5 +1,4 @@
 import numpy as np
-from tslearn.metrics import dtw
 
 from utils.MaxCoordCache import MaxNCoordCache, Node
 from typing import Any
@@ -65,15 +64,47 @@ class PresentPipeline:
     # similarity score
     # data is time x sensors
     def get_similarity_score(self, current_data: np.ndarray, reference_data: np.ndarray) -> float:
-        # dynamic time warping to get on same time axis --> similarity score
-        similarity_scores = 0
-        for i in range(len(current_data[0])): # for each sensor
-            current_sensor_data = current_data[:, i]
-            reference_sensor_data = reference_data[:, i]
-            distance = dtw(current_sensor_data, reference_sensor_data, metric='euclidean')
-            similarity_scores += distance
+        """
+        Fast similarity via interpolation + Euclidean distance.
 
-        return similarity_scores / len(current_data[0])
+        Per user request: interpolate sequences to common length, then compute
+        simple Euclidean distance. O(n) complexity, ideal for real-time.
+
+        Args:
+            current_data: (time1, n_sensors)
+            reference_data: (time2, n_sensors)
+
+        Returns:
+            Average Euclidean distance per sensor (lower = more similar)
+        """
+        n_sensors = current_data.shape[1]
+        len_curr = current_data.shape[0]
+        len_ref = reference_data.shape[0]
+
+        # Interpolate both to common length (average of the two)
+        target_len = (len_curr + len_ref) // 2
+
+        total_distance = 0.0
+        for i in range(n_sensors):
+            # Interpolate current channel to target length
+            curr_interp = np.interp(
+                np.linspace(0, 1, target_len),
+                np.linspace(0, 1, len_curr),
+                current_data[:, i]
+            )
+
+            # Interpolate reference channel to target length
+            ref_interp = np.interp(
+                np.linspace(0, 1, target_len),
+                np.linspace(0, 1, len_ref),
+                reference_data[:, i]
+            )
+
+            # Euclidean distance
+            distance = np.linalg.norm(curr_interp - ref_interp)
+            total_distance += distance
+
+        return total_distance / n_sensors
     
     def update_similarity_scores(self, cache: MaxNCoordCache, all_data: np.ndarray, activation_window: Any, n_nodes: int = 5) -> float:
         top_nodes = cache.get_top_n_nodes(n=n_nodes)
