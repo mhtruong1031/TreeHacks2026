@@ -80,9 +80,9 @@ Created `main_runtime.py` with comprehensive CLI and orchestration:
    python main_runtime.py --simulate test.csv --skip-calibration
    ```
 
-3. **Status Monitoring:**
-   - Packet throughput (Hz)
-   - Attempts cached
+3. **Status Monitoring (updates every 1 second):**
+   - Calibration: Progress %, samples collected, rate, time remaining
+   - Streaming: Packet throughput (Hz), attempts cached, elapsed time
    - Model training status (✓ Trained / Pending)
    - Async operation indicators (⏳)
    - Artifact rejection rate

@@ -39,7 +39,8 @@ class RuntimeOrchestrator:
         skip_calibration: bool = False,
         use_whitening: bool = False,
         adaptive_threshold_n_std: float = 2.5,
-        fs: float = 200.0
+        fs: float = 200.0,
+        top_n_attempts: int = 5
     ):
         """
         Args:
@@ -49,6 +50,7 @@ class RuntimeOrchestrator:
             use_whitening: Enable spatial whitening after calibration
             adaptive_threshold_n_std: Std multiplier for adaptive thresholds (default: 2.5)
             fs: Sampling rate in Hz (default: 200.0)
+            top_n_attempts: Number of top attempts to display in status (default: 5)
         """
         self.data_source = data_source
         self.calibration_time_s = calibration_time_s
@@ -56,6 +58,7 @@ class RuntimeOrchestrator:
         self.use_whitening = use_whitening
         self.adaptive_threshold_n_std = adaptive_threshold_n_std
         self.fs = fs
+        self.top_n_attempts = top_n_attempts
 
         self.calibration: BaselineCalibration | None = None
         self.pipeline: MainPipeline | None = None
@@ -106,6 +109,7 @@ class RuntimeOrchestrator:
         packet_count = 0
         none_count = 0
         max_none = 100  # Allow up to 100 consecutive None packets before giving up
+        last_report_time = t_start
 
         while len(rest_data) < n_samples_needed and self.data_source.is_running():
             packet = self.data_source.get_packet()
@@ -123,13 +127,16 @@ class RuntimeOrchestrator:
             rest_data.append(packet)
             packet_count += 1
 
-            # Progress report every 1000 packets
-            if packet_count % 1000 == 0:
-                elapsed = time.perf_counter() - t_start
+            # Progress report every 1 second
+            current_time = time.perf_counter()
+            if current_time - last_report_time >= 1.0:
+                elapsed = current_time - t_start
                 progress = len(rest_data) / n_samples_needed * 100
                 rate = packet_count / elapsed if elapsed > 0 else 0
+                time_remaining = (n_samples_needed - len(rest_data)) / rate if rate > 0 else 0
                 print(f"  [{progress:5.1f}%] {len(rest_data):>6,} / {n_samples_needed:,} samples  |  "
-                      f"{rate:6.1f} Hz  |  {elapsed:5.1f}s")
+                      f"{rate:6.1f} Hz  |  {elapsed:5.1f}s  |  ~{time_remaining:4.1f}s remaining")
+                last_report_time = current_time
 
         elapsed = time.perf_counter() - t_start
         actual_rate = len(rest_data) / elapsed if elapsed > 0 else 0
@@ -168,6 +175,7 @@ class RuntimeOrchestrator:
         t_start = time.perf_counter()
         packet_count = 0
         last_report_time = t_start
+        last_report_packet_count = 0
 
         while self.data_source.is_running():
             packet = self.data_source.get_packet()
@@ -180,15 +188,18 @@ class RuntimeOrchestrator:
             self.pipeline.run(packet)
             packet_count += 1
 
-            # Status report every 1000 packets
-            if packet_count % 1000 == 0:
-                current_time = time.perf_counter()
+            # Status report every 1 second (time-based instead of packet-based)
+            current_time = time.perf_counter()
+            if current_time - last_report_time >= 1.0:
                 elapsed = current_time - t_start
                 interval = current_time - last_report_time
-                rate = 1000 / interval if interval > 0 else 0
-                last_report_time = current_time
+                packets_in_interval = packet_count - last_report_packet_count
+                rate = packets_in_interval / interval if interval > 0 else 0
 
                 self._print_status_report(packet_count, elapsed, rate)
+
+                last_report_time = current_time
+                last_report_packet_count = packet_count
 
         # Final report
         elapsed = time.perf_counter() - t_start
@@ -239,14 +250,15 @@ class RuntimeOrchestrator:
               f"Attempts: {n_attempts:>3} | Model: {model_status} | "
               f"T{training_icon} S{similarity_icon} P{prediction_icon}{artifact_info}")
 
-        # Show top attempts if available
+        # Show top attempts if available (use configurable top_n)
         if n_attempts >= 3:
-            self._print_top_attempts(n=3)
+            self._print_top_attempts(n=min(self.top_n_attempts, n_attempts))
 
     def _print_top_attempts(self, n: int = 3):
         """Print top N attempts with coordination and similarity scores."""
         with self.pipeline.cache_lock:
             top_nodes = self.pipeline.max_n_coord_cache.get_top_n_nodes(n)
+            predicted_ideal = self.pipeline.max_n_coord_cache.predicted_ideal
 
         if not top_nodes:
             return
@@ -256,6 +268,10 @@ class RuntimeOrchestrator:
             coord = node.coordination_index
             sim = node.similarity_score if node.similarity_score is not None else 0.0
             print(f"    {i}. Coord: {coord:.4f} | Similarity: {sim:.4f}")
+
+        # Show predicted ideal similarity if model is trained
+        if predicted_ideal is not None and predicted_ideal.similarity_score is not None:
+            print(f"  Similarity to predicted ideal: {predicted_ideal.similarity_score:.4f}")
 
     def _print_final_summary(self):
         """Print final pipeline statistics."""
@@ -367,6 +383,12 @@ Examples:
         default=200.0,
         help="Sampling rate in Hz (default: 200.0)"
     )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=5,
+        help="Number of top attempts to display (default: 5)"
+    )
 
     args = parser.parse_args()
 
@@ -391,7 +413,8 @@ Examples:
         skip_calibration=args.skip_calibration,
         use_whitening=args.whitening,
         adaptive_threshold_n_std=args.threshold_n_std,
-        fs=args.fs
+        fs=args.fs,
+        top_n_attempts=args.top_n
     )
 
     orchestrator.run()

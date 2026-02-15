@@ -38,15 +38,21 @@ python main_runtime.py --live --calibration-time 60
 ```
 PHASE 1: BASELINE CALIBRATION
 Please sit still and relax for 60 seconds...
-[100.0%] 12,000 / 12,000 samples | 200.0 Hz | 60.0s
+[ 26.7%]    160 / 600 samples  |  159.8 Hz  |   1.0s  |  ~ 2.8s remaining
+[ 53.0%]    318 / 600 samples  |  158.4 Hz  |   2.0s  |  ~ 1.8s remaining
+[ 79.0%]    474 / 600 samples  |  157.6 Hz  |   3.0s  |  ~ 0.8s remaining
 ✓ Calibration complete
 
 PHASE 2: STREAMING ANALYSIS
-[    5.0s] Packets:   1,000 | Rate: 200.0 Hz | Attempts: 3 | Model: Pending (3/30)
+[    1.0s] Packets:   157 | Rate: 156.7 Hz | Attempts: 0 | Model: Pending (0/30)
+[    2.0s] Packets:   317 | Rate: 159.4 Hz | Attempts: 0 | Model: Pending (0/30)
+[    3.0s] Packets:   545 | Rate: 184.3 Hz | Attempts: 6 | Model: Pending (6/30)
   Top attempts:
-    1. Coord: 0.4609 | Similarity: 0.0000
-    2. Coord: 0.3930 | Similarity: 0.2121
+    1. Coord: 0.4391 | Similarity: 0.0000
+    2. Coord: 0.4287 | Similarity: 0.1599
 ```
+
+**Note:** Status updates print every **1 second** for real-time feedback.
 
 ### 2. Testing with Simulated Data
 
@@ -57,7 +63,7 @@ python main_runtime.py --simulate test_data.csv --speed 0 --calibration-time 5
 
 **For realistic simulation (real-time):**
 ```bash
-python main_runtime.py --simulate data.csv --speed 1.0
+python3 main_runtime.py --simulate test_data.csv --speed 1.0
 ```
 
 ### 3. Advanced Options
@@ -183,15 +189,15 @@ Channel stds:  [0.0924, 0.0829, 0.0828, 0.0837]     # Noise level per channel
 Thresholds:    [0.2273, 0.2093, 0.2041, 0.2159]     # Activation thresholds
 ```
 
-### Streaming Statistics
+### Streaming Statistics (printed every 1 second)
 ```
 [    5.0s]      # Elapsed time
 Packets: 1,000  # Total packets processed
-Rate: 200.0 Hz  # Current throughput
+Rate: 200.0 Hz  # Throughput in last second
 Attempts: 3     # Movement attempts detected
 Model: Pending  # Prediction model status
 T  S  P         # Async operations: Training, Similarity, Prediction (⏳ = active)
-Artifacts: 56   # Packets rejected as artifacts
+Artifacts: 56   # Packets rejected as artifacts (5.6%)
 ```
 
 ### Top Attempts
