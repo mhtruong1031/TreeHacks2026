@@ -1,8 +1,9 @@
-from utils.Model import Model
+import numpy as np
 import torch
 import torch.nn as nn
+
+from utils.Model import Model
 from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
 
 class PredictionPipeline:
     def __init__(self, input_size: int = 1, hidden_size: int = 32, num_layers: int = 2):
@@ -63,7 +64,7 @@ class PredictionPipeline:
         torch.save(self.model.state_dict(), "../cache/neural_prediction_model.pth")
         return self.model
 
-    # Train the model on a new data point (updates weights using the latest datapoint)
+    # Train the model on a new data point
     def add_to_model(self, data: np.ndarray):
         if self.model is None:
             raise RuntimeError("model not initialized; call train_initial_model first")

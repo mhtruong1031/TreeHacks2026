@@ -17,7 +17,7 @@ class MainPipeline:
         
         self.data                 = np.array([])
         self.processed_data       = np.array([])
-        self.max_n_coord_cache    = MaxNCoordCache(epsilon=0.1) # MaxHeap of each attempt ranked by Coordination Index
+        self.max_n_coord_cache    = MaxNCoordCache(epsilon=0.1) # MaxHeap of each attempt ranked by Coordination Index # Stores attempts
 
         # Initialize pipelines
         self.preprocessing_pipeline = PreprocessingPipeline() # Stage 1
@@ -42,7 +42,8 @@ class MainPipeline:
         activation_window = self.check_activation():
         if activation_window: # If activation window is found, get coordination index and add to cache
             coordination_index = self.present_pipeline.get_coordination_index(self.processed_data[activation_window[0]:activation_window[1]])
-            self.max_n_coord_cache.add_node(coordination_index, activation_window)
+            self.max_n_coord_cache.add_node(coordination_index, activation_window) # add new attempt to cache
+            self.present_pipeline.update_similarity_scores(self.processed_data, activation_window, n_nodes=5) # update top 5 nodes with similarity score
         
         # If enough data has been collected for prediction, run prediction pipeline
         if len(self.activation_windows) >= self.prediction_data_threshold: #if enough data has been collected for prediction

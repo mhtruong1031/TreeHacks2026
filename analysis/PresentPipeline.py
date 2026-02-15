@@ -1,4 +1,5 @@
 import numpy as np
+from tslearn.metrics import dtw
 
 class PresentPipeline:
     def __init__(self):
@@ -59,3 +60,26 @@ class PresentPipeline:
         return bimodality_coefficient
     
     # similarity score
+    # data is time x sensors
+    def get_similarity_score(self, current_data: np.ndarray, reference_data: np.ndarray) -> float:
+        # dynamic time warping to get on same time axis --> similarity score
+        similarity_scores = 0
+        for i in range(len(current_data[0])): # for each sensor
+            current_sensor_data = current_data[:, i]
+            reference_sensor_data = reference_data[:, i]
+            distance = dtw(current_sensor_data, reference_sensor_data, metric='euclidean')
+            similarity_scores += distance
+
+        return similarity_scores / len(current_data[0])
+    
+    def update_similarity_scores(self, all_data: np.ndarray, activation_window: Any, n_nodes: int = 5) -> float:
+        top_nodes = self.max_n_coord_cache.get_top_n_nodes(n=n_nodes)
+        for node in top_nodes:
+            if node.activation_window.equals(activation_window):
+                continue
+
+            current_data   = all_data[activation_window[0]:activation_window[1]]
+            reference_data = all_data[node.activation_window[0]:node.activation_window[1]]
+            
+            node.similarity_score = self.get_similarity_score(current_data, reference_data)
+
