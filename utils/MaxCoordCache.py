@@ -36,3 +36,25 @@ class MaxNCoordCache:
     def get_top_n_nodes(self, n: int) -> list[Node]:
         top = heapq.nsmallest(n, self._heap)
         return [node for _key, node in top]
+
+    def adjust_windows(self, offset: int):
+        """
+        Shift all activation windows by offset (negative = shift left).
+        Remove nodes whose windows are now invalid (start < 0).
+
+        Used for memory management when old data is trimmed from processed_data buffer.
+
+        Args:
+            offset: Number of samples to shift (negative to shift left/remove old)
+        """
+        valid_heap = []
+        for key, node in self._heap:
+            new_start = node.activation_window[0] + offset
+            new_end = node.activation_window[1] + offset
+
+            if new_start >= 0:  # Keep if still valid
+                node.activation_window = (new_start, new_end)
+                valid_heap.append((key, node))
+
+        self._heap = valid_heap
+        heapq.heapify(self._heap)

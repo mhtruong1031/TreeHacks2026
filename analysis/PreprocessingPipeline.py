@@ -12,6 +12,48 @@ class PreprocessingPipeline:
         """
         self.target_fs = target_fs
 
+    def run(self, data: np.ndarray) -> np.ndarray:
+        """
+        Process raw EEG/EMG window through full preprocessing pipeline.
+
+        This is the main entry point called by MainPipeline. It applies downsampling
+        and all filter stages to produce clean, centered data ready for analysis.
+
+        Args:
+            data: Raw window of shape (n_samples, n_channels) where n_channels=4
+                  (3 EEG + 1 EMG). No time column - just voltage data at 200Hz.
+
+        Returns:
+            Preprocessed data of shape (n_downsampled, n_channels).
+            Filtered and downsampled to target_fs (default 100Hz).
+        """
+        # Add time column for compatibility with existing downsample_window method
+        n_samples = data.shape[0]
+        times = np.arange(n_samples) / 200.0  # Known 200Hz sampling rate
+        data_with_time = np.column_stack([times, data])
+
+        # Step 1: Downsample from 200Hz → target_fs (100Hz)
+        downsampled = self.downsample_window(data_with_time)
+
+        # Step 2: Apply filters per channel
+        n_channels = data.shape[1]
+        filtered = downsampled.copy()
+
+        for ch in range(1, n_channels + 1):  # Skip time column (index 0)
+            sig = filtered[:, ch]
+            # Filters use dynamic padding, can handle short sequences
+            if filtered.shape[0] >= 13:  # Absolute minimum for order-4 filter
+                # Bandpass to remove DC drift and high-frequency noise
+                sig = self.bandpass_filter(sig, self.target_fs, low_cut=0.5, high_cut=45.0)
+                # Lowpass for blink artifacts
+                sig = self.lowpass_blink_filter(sig, self.target_fs, cutoff=30.0)
+                # Bandstop for sweat artifacts
+                sig = self.bandstop_sweat_filter(sig, self.target_fs, center=0.5, width=0.4)
+            filtered[:, ch] = sig
+
+        # Step 3: Return only voltage channels (remove time column)
+        return filtered[:, 1:]
+
     def _estimate_fs(self, times: np.ndarray) -> float:
         """Estimate the sampling frequency from a time vector.
 
@@ -59,7 +101,10 @@ class PreprocessingPipeline:
             )
         sos = butter(order, [low_cut / nyquist, high_cut / nyquist],
                      btype="band", output="sos")
-        return sosfiltfilt(sos, signal)
+
+        # Use dynamic padding for short sequences
+        padlen = min(len(signal) - 1, 3 * (2 * order))
+        return sosfiltfilt(sos, signal, padlen=padlen)
 
     # Keep the individual filters available for fine-grained use
     def lowpass_blink_filter(
@@ -86,7 +131,10 @@ class PreprocessingPipeline:
                 f"Cutoff ({cutoff} Hz) must be below the Nyquist frequency ({nyquist} Hz)."
             )
         sos = butter(order, cutoff / nyquist, btype="low", output="sos")
-        return sosfiltfilt(sos, signal)
+
+        # Use dynamic padding for short sequences
+        padlen = min(len(signal) - 1, 3 * (2 * order))
+        return sosfiltfilt(sos, signal, padlen=padlen)
 
     def bandstop_sweat_filter(
         self,
@@ -123,7 +171,10 @@ class PreprocessingPipeline:
             )
 
         sos = butter(order, [low, high], btype="bandstop", output="sos")
-        return sosfiltfilt(sos, signal)
+
+        # Use dynamic padding for short sequences
+        padlen = min(len(signal) - 1, 3 * (2 * order))
+        return sosfiltfilt(sos, signal, padlen=padlen)
 
     def _downsample_single_channel(
         self,

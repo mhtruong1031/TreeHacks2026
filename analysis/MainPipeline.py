@@ -1,31 +1,29 @@
 from PreprocessingPipeline import PreprocessingPipeline
 from PredictionPipeline import PredictionPipeline
 from PresentPipeline import PresentPipeline
-from LLMPipeline import LLMPipeline
-from ProgressMonitor import ProgressMonitor
 
 from utils.MaxCoordCache import MaxNCoordCache, Node
 
 import numpy as np
 from collections import deque
+import threading
 
 class MainPipeline:
     # window size in seconds
     # TODO find activation threshold
-    def __init__(
-        self,
-        window_size_s: float = 0.2,
-        activation_threshold: float = 0.2,
-        prediction_data_threshold: float = 30,
-        api_key: str | None = None,
-        movement_class: str = "wrist_flex_ext",
-        personality: str = "encouraging",
-    ):  # 200hz sampling rate
+    def __init__(self, window_size_s: float = 0.2, activation_threshold: float = 0.2, prediction_data_threshold: float = 30): # 200hz sampling rate
         self.window_size_samples       = int(window_size_s * 200)  # window size in samples   
         self.activation_threshold      = activation_threshold      # neuron activation threshold
         self.prediction_data_threshold = prediction_data_threshold # prediction data threshold
+        self.max_processed_samples     = max_processed_samples     # memory management threshold
         self.activation_buffer = 3  # number of points to count before activation
         self.activation_count = 0
+
+        # Calibration support
+        self.calibration = calibration
+        self.use_whitening = use_whitening
+        self.adaptive_threshold_n_std = adaptive_threshold_n_std
+        self.artifact_count = 0
 
         # Sliding window of raw data (only last window_size_samples); deque drops oldest when full
         self.data                 = deque(maxlen=self.window_size_samples)
@@ -36,7 +34,20 @@ class MainPipeline:
         # Initialize pipelines
         self.preprocessing_pipeline = PreprocessingPipeline() # Stage 1
         self.present_pipeline       = PresentPipeline()       # Stage 2
-        self.prediction_pipeline    = PredictionPipeline()    # Stage 3
+        self.prediction_pipeline    = PredictionPipeline(
+            hidden_size=32,
+            num_layers=2,
+            input_size=4
+        )    # Stage 3
+
+        # Threading state for async operations
+        self.training_in_progress = False
+        self.similarity_in_progress = False
+        self.prediction_in_progress = False
+
+        # Thread locks for safety
+        self.cache_lock = threading.Lock()
+        self.model_lock = threading.Lock()
 
         # Progress monitor (plateau / stagnation detection)
         self.progress_monitor = ProgressMonitor()
@@ -54,6 +65,16 @@ class MainPipeline:
 
     # Current_sample is a packet (single time point)
     def run(self, packet):
+        # Artifact rejection (before any processing)
+        if self.calibration and self.calibration.is_calibrated:
+            if np.any(self.calibration.is_artifact(packet, n_std=5.0)):
+                self.artifact_count += 1
+                return  # Skip this packet
+
+            # Optional: apply spatial whitening
+            if self.use_whitening:
+                packet = self.calibration.apply_whitening(packet.reshape(1, -1)).flatten()
+
         # Append packet; deque drops oldest when at maxlen (O(1))
         row = np.asarray(packet).reshape(-1)
         self.data.append(row)
@@ -72,9 +93,14 @@ class MainPipeline:
         else:
             self.processed_data.append(np.asarray(current_sample[-1]).reshape(-1))
 
+            # Trim old data if buffer is too large (with buffer to avoid frequent trimming)
+            if len(self.processed_data) > self.max_processed_samples + 1000:
+                self._trim_processed_data()
+
         # Check for activation
         activation_window = self.check_activation()
-        if activation_window: # If activation window is found, get coordination index and add to cache
+        if activation_window:
+            # FAST: Compute coordination index and add to cache (no blocking)
             coord_slice = self.processed_data[activation_window[0]:activation_window[1]]
             coordination_index = self.present_pipeline.get_coordination_index(np.array(coord_slice))
             self.max_n_coord_cache.add_node(coordination_index, activation_window) # add new attempt to cache
@@ -91,43 +117,21 @@ class MainPipeline:
                 self.max_n_coord_cache.predicted_ideal      = Node(coordination_index=0, activation_window=(0, 0), similarity_score=0)
             
             self.present_pipeline.update_similarity_scores(self.max_n_coord_cache, np.array(self.processed_data), activation_window, n_nodes=5) # update top 5 nodes with similarity score
-
-            # --- Progress monitoring + LLM feedback ---
-            # Get similarity score for the current attempt (use the latest node)
-            top_nodes = self.max_n_coord_cache.get_top_n_nodes(1)
-            current_similarity = top_nodes[0].similarity_score if top_nodes else 0.0
-
-            # Check for plateau / stagnation
-            progress_status = self.progress_monitor.add_attempt(coordination_index, current_similarity)
-
-            # Build metrics dict for the LLM
-            if self.llm_pipeline is not None:
-                top_5 = self.max_n_coord_cache.get_top_n_nodes(5)
-                metrics = {
-                    "coordination_index": coordination_index,
-                    "similarity_score": current_similarity,
-                    "attempt_number": len(self.max_n_coord_cache),
-                    "coordination_history": list(self.progress_monitor.coordination_history),
-                    "movement_class": self._movement_class,
-                    "trend": progress_status["trend"],
-                    "top_n_scores": [
-                        {
-                            "coordination_index": n.coordination_index,
-                            "similarity_score": n.similarity_score,
-                        }
-                        for n in top_5
-                    ],
-                    "has_prediction_model": self.prediction_pipeline.model is not None,
-                    "plateau_detected": progress_status["plateau_detected"],
-                    "plateau_type": progress_status["plateau_type"],
-                    "plateau_details": progress_status["details"],
-                }
-
-                self.latest_llm_response = self.llm_pipeline.generate_feedback(metrics)
                 
     
     def check_activation(self):
-        if np.any(np.abs(self.data[-1]) > self.activation_threshold):
+        current = self.data[-1]
+
+        # Adaptive threshold mode (per-channel thresholds based on calibration)
+        if self.calibration and self.calibration.is_calibrated:
+            threshold = (self.calibration.channel_mean +
+                        self.adaptive_threshold_n_std * self.calibration.channel_std)
+            activated = np.any(np.abs(current) > threshold)
+        else:
+            # Legacy fixed threshold mode
+            activated = np.any(np.abs(current) > self.activation_threshold)
+
+        if activated:
             if self.activation_count < self.activation_buffer:
                 self.activation_count += 1
             else:
@@ -140,54 +144,30 @@ class MainPipeline:
             self.activation_count = 0
             return None
 
-    def get_data_from_cache(self, n_nodes: int = 5) -> list:
+    def get_data_from_cache(self, n_nodes: int = 5, reverse_order: bool = False) -> list:
+        """
+        Retrieve data from cache.
+
+        Args:
+            n_nodes: Number of top attempts to retrieve
+            reverse_order: If True, return least→most coordinated (for training)
+
+        Returns:
+            List of np.ndarray attempts, each shape (seq_len_i, n_features)
+        """
         nodes = self.max_n_coord_cache.get_top_n_nodes(n_nodes)
+
+        # Reverse if we want least→most coordinated (for training)
+        if reverse_order:
+            nodes = nodes[::-1]
+
         return [
             np.array(self.processed_data[node.activation_window[0]:node.activation_window[1]])
             for node in nodes
         ]
 
-    # ------------------------------------------------------------------
-    # LLM convenience methods
-    # ------------------------------------------------------------------
-
-    def ask_llm(self, question: str) -> str | None:
-        """Forward a user question to the LLM coaching assistant."""
-        if self.llm_pipeline is None:
-            return None
-
-        # Build current metrics snapshot for context
-        top_5 = self.max_n_coord_cache.get_top_n_nodes(5)
-        metrics = {
-            "coordination_history": list(self.progress_monitor.coordination_history),
-            "movement_class": self._movement_class,
-            "attempt_number": len(self.max_n_coord_cache),
-            "trend": self.progress_monitor.get_trend(),
-            "top_n_scores": [
-                {
-                    "coordination_index": n.coordination_index,
-                    "similarity_score": n.similarity_score,
-                }
-                for n in top_5
-            ],
-            "has_prediction_model": self.prediction_pipeline.model is not None,
-        }
-        return self.llm_pipeline.ask(question, current_metrics=metrics)
-
-    def set_personality(self, personality: str) -> None:
-        """Switch the LLM coaching personality."""
-        if self.llm_pipeline is not None:
-            self.llm_pipeline.set_personality(personality)
-
-    def set_movement_class(self, movement_class: str) -> None:
-        """Update the current exercise and reset the progress monitor."""
-        self._movement_class = movement_class
-        self.progress_monitor.reset()
-        if self.llm_pipeline is not None:
-            self.llm_pipeline.set_movement_class(movement_class)
 
 
 
 
-            
 
